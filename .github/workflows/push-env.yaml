@@ -23,7 +23,7 @@ jobs:
           curl -LsSf https://hf.co/cli/install.sh | bash
 
       - name: Login to Hugging Face
-        run: f auth login --token ${{ secrets.HF_TOKEN }}
+        run: hf auth login --token ${{ secrets.HF_TOKEN }}
 
       - name: Build and push
         run: openenv push
