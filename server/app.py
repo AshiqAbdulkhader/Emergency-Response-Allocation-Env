@@ -36,10 +36,10 @@ except Exception as e:  # pragma: no cover
     ) from e
 
 try:
-    from ..models import EmergencyResponseAllocationAction, EmergencyResponseAllocationObservation
+    from models import EmergencyResponseAllocationAction, EmergencyResponseAllocationObservation
     from .emergency_response_allocation_environment import EmergencyResponseAllocationEnvironment
 except ModuleNotFoundError:
-    from models import EmergencyResponseAllocationAction, EmergencyResponseAllocationObservation
+    from ..models import EmergencyResponseAllocationAction, EmergencyResponseAllocationObservation
     from server.emergency_response_allocation_environment import EmergencyResponseAllocationEnvironment
 
 
