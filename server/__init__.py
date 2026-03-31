@@ -6,6 +6,9 @@
 
 """Emergency Response Allocation environment server components."""
 
-from .emergency_response_allocation_environment import EmergencyResponseAllocationEnvironment
+try:
+    from .emergency_response_allocation_environment import EmergencyResponseAllocationEnvironment
+except ImportError:
+    from emergency_response_allocation_environment import EmergencyResponseAllocationEnvironment
 
 __all__ = ["EmergencyResponseAllocationEnvironment"]

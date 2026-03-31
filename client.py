@@ -12,7 +12,10 @@ from openenv.core import EnvClient
 from openenv.core.client_types import StepResult
 from openenv.core.env_server.types import State
 
-from .models import EmergencyResponseAllocationAction, EmergencyResponseAllocationObservation
+try:
+    from .models import EmergencyResponseAllocationAction, EmergencyResponseAllocationObservation
+except ImportError:
+    from models import EmergencyResponseAllocationAction, EmergencyResponseAllocationObservation
 
 
 class EmergencyResponseAllocationEnv(

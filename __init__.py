@@ -6,8 +6,12 @@
 
 """Emergency Response Allocation Environment."""
 
-from .client import EmergencyResponseAllocationEnv
-from .models import EmergencyResponseAllocationAction, EmergencyResponseAllocationObservation
+try:
+    from .client import EmergencyResponseAllocationEnv
+    from .models import EmergencyResponseAllocationAction, EmergencyResponseAllocationObservation
+except ImportError:
+    from client import EmergencyResponseAllocationEnv
+    from models import EmergencyResponseAllocationAction, EmergencyResponseAllocationObservation
 
 __all__ = [
     "EmergencyResponseAllocationAction",
