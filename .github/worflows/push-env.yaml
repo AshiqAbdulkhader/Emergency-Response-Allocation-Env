@@ -1,0 +1,29 @@
+name: Push environment to Hugging Face Spaces
+
+on:
+  push:
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.13
+
+      - name: Install OpenEnv
+        run: pip install openenv
+
+      - name: Setup Hugging Face CLI
+        run: |
+          curl -LsSf https://hf.co/cli/install.sh | bash
+
+      - name: Login to Hugging Face
+        run: f auth login --token ${{ secrets.HF_TOKEN }}
+
+      - name: Build and push
+        run: openenv push
