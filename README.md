@@ -38,9 +38,67 @@ least one free ambulance are both available.
   - Off-peak -> 1.0x travel
   - Night: 10pm-6am -> 0.7x travel
 
+## Mathematical View
+
+ERAS can be viewed as an event-driven dispatch process over a city grid
+
+```text
+G = {0, ..., 19} x {0, ..., 19}
+```
+
+with internal simulator state
+
+```text
+x_t = (B_t, U_t, Q_t, t)
+```
+
+where:
+
+- `B_t` is the full ambulance state set
+- `U_t` is the full incident set, including pending, dispatched, and resolved cases
+- `Q_t` is the future event queue
+- `t` is simulated time in minutes
+
+The agent does not consume `x_t` directly. Instead, it receives a fixed-size
+observation
+
+```text
+o_t = [A_t ; I_t ; vec(T_t) ; h_t] in R^111
+```
+
+where:
+
+- `A_t in R^(5x4)` is the ambulance feature block
+- `I_t in R^(10x4)` is the visible incident block, padded with zeros
+- `T_t in R^(5x10)` is the ambulance-to-incident travel-time matrix
+- `h_t in R` is the current time of day in hours
+
+Travel times are computed as
+
+```text
+tau((x1, y1), (x2, y2), t)
+  = ||(x1, y1) - (x2, y2)||_2 * m(t)
+```
+
+where `m(t)` is the traffic multiplier:
+
+- `1.8` during peak traffic windows
+- `1.0` off-peak
+- `0.7` at night
+
+Because only the top 10 pending incidents are exposed, the agent-facing view is
+a priority-truncated representation of the full simulator state.
+
 ## Observation Space
 
-Each observation contains a fixed-size `observation_vector` of length `111`:
+Each observation contains a fixed-size `observation_vector` of length `111`.
+The layout is:
+
+```text
+o_t = [A_t ; I_t ; vec(T_t) ; h_t]
+```
+
+with:
 
 - Ambulances: `5 x 4`
   - `x`
@@ -56,18 +114,57 @@ Each observation contains a fixed-size `observation_vector` of length `111`:
   - ambulance-to-incident travel matrix
 - Time of day: `1`
 
+More explicitly:
+
+```text
+A_t[i] = (x_i, y_i, free_i, eta_i)
+I_t[j] = (x_j, y_j, s_j, w_j)
+T_t[i, j] = tau(ambulance_i, incident_j, t)
+```
+
+where:
+
+- `x`, `y` are raw grid coordinates in `[0, 19]`
+- `free_i in {0, 1}`
+- `eta_i` is remaining time until ambulance `i` is free, in simulated minutes
+- `s_j in {0, 1, 2, 3}` with `0=padding`, `1=low`, `2=moderate`, `3=critical`
+- `w_j` is time since incident `j` was reported, in simulated minutes
+
+The flattened vector uses this ordering:
+
+- indices `0-19`: ambulance block
+- indices `20-59`: incident block
+- indices `60-109`: flattened travel-time matrix
+- index `110`: time of day in hours `[0, 24)`
+
+Visible incidents are sorted by priority before encoding:
+
+```text
+sort key = (-severity_weight, -time_since_reported, incident_id)
+```
+
+If fewer than 10 pending incidents exist, the remaining incident slots and
+their travel-time entries are padded with zeros.
+
 The observation also includes:
 
 - `valid_action_mask`: boolean mask over the discrete action space
 - `ambulances`: structured debug view of ambulance states
 - `incidents`: structured debug view of visible incidents
 - `travel_times`: structured 5x10 matrix
+- `visible_incident_ids`: stable incident ids aligned to the 10 incident slots
 - `info`: metrics such as average response time, coverage, utilization, and
   missed critical cases
 
 ## Action Space
 
 The action space is discrete with `55` actions:
+
+```text
+A = {0, 1, ..., 54}
+```
+
+It is partitioned into assignment actions and hold actions:
 
 - `0-49`: assign `ambulance_i` to visible `incident_slot_j`
 - `50-54`: hold action for ambulance `0-4`
@@ -84,7 +181,35 @@ Hold indexing is:
 action_index = 50 + ambulance_id
 ```
 
-Only valid actions are enabled in `valid_action_mask`.
+Equivalently:
+
+```text
+assign(i, j) = 10i + j
+hold(i) = 50 + i
+```
+
+with `i in {0, ..., 4}` and `j in {0, ..., 9}`.
+
+The valid action set at decision time `t` is:
+
+```text
+V_t =
+  {assign(i, j) : ambulance i is free and incident slot j is occupied}
+  union
+  {hold(i) : ambulance i is free and at least one visible incident exists}
+```
+
+`valid_action_mask` is the binary encoding of `V_t` in `{0, 1}^55`.
+
+One important representation detail is that assignment actions target incident
+slots, not globally stable incident positions. Slot `j` always refers to the
+`j`th incident in the current priority-sorted visible list, and the
+`visible_incident_ids` field tells you which underlying incident ids those slots
+map to.
+
+After an action is applied, the simulator advances to the next actionable event
+rather than the next fixed time tick. In other words, one RL step corresponds
+to one dispatch decision followed by event-queue progression.
 
 ## Reward
 
