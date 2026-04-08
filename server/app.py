@@ -4,72 +4,104 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""
-FastAPI application for the Emergency Response Allocation Environment.
+"""FastAPI app for the Emergency Response Allocation OpenEnv environment."""
 
-This module creates an HTTP server that exposes the EmergencyResponseAllocationEnvironment
-over HTTP and WebSocket endpoints, compatible with EnvClient.
-
-Endpoints:
-    - POST /reset: Reset the environment
-    - POST /step: Execute an action
-    - GET /state: Get current environment state
-    - GET /schema: Get action/observation schemas
-    - WS /ws: WebSocket endpoint for persistent sessions
-
-Usage:
-    # Development (with auto-reload):
-    uvicorn server.app:app --reload --host 0.0.0.0 --port 8000
-
-    # Production:
-    uvicorn server.app:app --host 0.0.0.0 --port 8000 --workers 4
-
-    # Or run directly:
-    python -m server.app
-"""
+from fastapi import FastAPI
 
 try:
     from openenv.core.env_server.http_server import create_app
+    from openenv.core.env_server.types import SchemaResponse
 except Exception as e:  # pragma: no cover
     raise ImportError(
         "openenv is required for the web interface. Install dependencies with '\n    uv sync\n'"
     ) from e
 
 try:
-    from ..models import EmergencyResponseAllocationAction, EmergencyResponseAllocationObservation
-    from ..server.emergency_response_allocation_environment import EmergencyResponseAllocationEnvironment
+    from ..models import (
+        EmergencyResponseAllocationAction,
+        EmergencyResponseAllocationObservation,
+        EmergencyResponseAllocationState,
+    )
+    from ..server.evaluation import GradeRequest, GradeResult, TaskSpec, grade_request_for_task, list_task_specs
+    from ..server.emergency_response_allocation_environment import (
+        EmergencyResponseAllocationEnvironment,
+    )
 except ImportError:
-    from models import EmergencyResponseAllocationAction, EmergencyResponseAllocationObservation
-    from server.emergency_response_allocation_environment import EmergencyResponseAllocationEnvironment
+    from models import (
+        EmergencyResponseAllocationAction,
+        EmergencyResponseAllocationObservation,
+        EmergencyResponseAllocationState,
+    )
+    from server.evaluation import (
+        GradeRequest,
+        GradeResult,
+        TaskSpec,
+        grade_request_for_task,
+        list_task_specs,
+    )
+    from server.emergency_response_allocation_environment import (
+        EmergencyResponseAllocationEnvironment,
+    )
 
 
-# Create the app with web interface and README integration
 app = create_app(
     EmergencyResponseAllocationEnvironment,
     EmergencyResponseAllocationAction,
     EmergencyResponseAllocationObservation,
     env_name="emergency_response_allocation",
-    max_concurrent_envs=1,  # increase this number to allow more concurrent WebSocket sessions
+    max_concurrent_envs=4,
 )
 
 
+def _remove_route(app_instance: FastAPI, path: str, method: str) -> None:
+    app_instance.router.routes = [
+        route
+        for route in app_instance.router.routes
+        if not (
+            getattr(route, "path", None) == path
+            and method.upper() in getattr(route, "methods", set())
+        )
+    ]
+
+
+_remove_route(app, "/state", "GET")
+_remove_route(app, "/schema", "GET")
+
+
+@app.get("/state", response_model=EmergencyResponseAllocationState, tags=["State Management"])
+async def state() -> EmergencyResponseAllocationState:
+    env = EmergencyResponseAllocationEnvironment()
+    try:
+        return env.state
+    finally:
+        env.close()
+
+
+@app.get("/schema", response_model=SchemaResponse, tags=["Schema"])
+async def schema() -> SchemaResponse:
+    return SchemaResponse(
+        action=EmergencyResponseAllocationAction.model_json_schema(),
+        observation=EmergencyResponseAllocationObservation.model_json_schema(),
+        state=EmergencyResponseAllocationState.model_json_schema(),
+    )
+
+
+@app.get("/tasks", response_model=list[TaskSpec], tags=["Evaluation"])
+async def tasks() -> list[TaskSpec]:
+    """Enumerate ERAS benchmark tasks."""
+
+    return list_task_specs()
+
+
+@app.post("/grade/{task_id}", response_model=GradeResult, tags=["Evaluation"])
+async def grade(task_id: str, request: GradeRequest) -> GradeResult:
+    """Grade externally supplied task metrics into [0, 1] scores."""
+
+    return grade_request_for_task(task_id, request)
+
+
 def main(host: str = "0.0.0.0", port: int = 8000):
-    """
-    Entry point for direct execution via uv run or python -m.
-
-    This function enables running the server without Docker:
-        uv run --project . server
-        uv run --project . server --port 8001
-        python -m emergency_response_allocation.server.app
-
-    Args:
-        host: Host address to bind to (default: "0.0.0.0")
-        port: Port number to listen on (default: 8000)
-
-    For production deployments, consider using uvicorn directly with
-    multiple workers:
-        uvicorn emergency_response_allocation.server.app:app --workers 4
-    """
+    """Run the environment server with uvicorn."""
     import uvicorn
 
     uvicorn.run(app, host=host, port=port)

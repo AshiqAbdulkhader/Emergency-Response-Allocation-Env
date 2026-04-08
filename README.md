@@ -1,255 +1,473 @@
 ---
 title: Emergency Response Allocation Environment Server
-emoji: 🏸
-colorFrom: indigo
-colorTo: blue
+emoji: 🚑
+colorFrom: blue
+colorTo: red
 sdk: docker
 pinned: false
 app_port: 8000
 base_path: /web
 tags:
   - openenv
+  - reinforcement-learning
+  - emergency-response
 ---
 
 # Emergency Response Allocation Environment
 
-A simple test environment that echoes back messages. Perfect for testing the env APIs as well as demonstrating environment usage patterns.
+Emergency Response Allocation System (ERAS) is an OpenEnv-compatible reinforcement
+learning environment for ambulance dispatch. It simulates a 20x20 urban grid,
+stochastic emergency demand, time-varying traffic, ambulance availability, and
+severity-aware reward shaping.
+
+The simulator is event-driven: the agent is asked to act only when there is a
+meaningful dispatch decision, namely when at least one pending incident and at
+least one free ambulance are both available.
+
+## Implemented Scenario
+
+- Map: 20x20 abstract city grid
+- Ambulances: 5
+- Depots: 3 at northwest, center, and southeast anchors
+- Hospitals: 2 at northwest and southeast quadrants
+- Visible incidents: top 10 pending incidents, sorted by severity then wait time
+- Episode horizon: 24 simulated hours
+- Demand model: piecewise Poisson arrivals with morning/evening peaks
+- Traffic model:
+  - Peak: 8-10am and 5-7pm -> 1.8x travel
+  - Off-peak -> 1.0x travel
+  - Night: 10pm-6am -> 0.7x travel
+
+## Mathematical View
+
+ERAS can be viewed as an event-driven dispatch process over a city grid
+
+```text
+G = {0, ..., 19} x {0, ..., 19}
+```
+
+with internal simulator state
+
+```text
+x_t = (B_t, U_t, Q_t, t)
+```
+
+where:
+
+- `B_t` is the full ambulance state set
+- `U_t` is the full incident set, including pending, dispatched, and resolved cases
+- `Q_t` is the future event queue
+- `t` is simulated time in minutes
+
+The agent does not consume `x_t` directly. Instead, it receives a fixed-size
+observation
+
+```text
+o_t = [A_t ; I_t ; vec(T_t) ; h_t] in R^111
+```
+
+where:
+
+- `A_t in R^(5x4)` is the ambulance feature block
+- `I_t in R^(10x4)` is the visible incident block, padded with zeros
+- `T_t in R^(5x10)` is the ambulance-to-incident travel-time matrix
+- `h_t in R` is the current time of day in hours
+
+Travel times are computed as
+
+```text
+tau((x1, y1), (x2, y2), t)
+  = ||(x1, y1) - (x2, y2)||_2 * m(t)
+```
+
+where `m(t)` is the traffic multiplier:
+
+- `1.8` during peak traffic windows
+- `1.0` off-peak
+- `0.7` at night
+
+Because only the top 10 pending incidents are exposed, the agent-facing view is
+a priority-truncated representation of the full simulator state.
+
+## Observation Space
+
+Each observation contains a fixed-size `observation_vector` of length `111`.
+The layout is:
+
+```text
+o_t = [A_t ; I_t ; vec(T_t) ; h_t]
+```
+
+with:
+
+- Ambulances: `5 x 4`
+  - `x`
+  - `y`
+  - `is_free`
+  - `eta_free`
+- Incidents: `10 x 4`
+  - `x`
+  - `y`
+  - `severity_code`
+  - `time_since_reported`
+- Travel times: `5 x 10`
+  - ambulance-to-incident travel matrix
+- Time of day: `1`
+
+More explicitly:
+
+```text
+A_t[i] = (x_i, y_i, free_i, eta_i)
+I_t[j] = (x_j, y_j, s_j, w_j)
+T_t[i, j] = tau(ambulance_i, incident_j, t)
+```
+
+where:
+
+- `x`, `y` are raw grid coordinates in `[0, 19]`
+- `free_i in {0, 1}`
+- `eta_i` is remaining time until ambulance `i` is free, in simulated minutes
+- `s_j in {0, 1, 2, 3}` with `0=padding`, `1=low`, `2=moderate`, `3=critical`
+- `w_j` is time since incident `j` was reported, in simulated minutes
+
+The flattened vector uses this ordering:
+
+- indices `0-19`: ambulance block
+- indices `20-59`: incident block
+- indices `60-109`: flattened travel-time matrix
+- index `110`: time of day in hours `[0, 24)`
+
+Visible incidents are sorted by priority before encoding:
+
+```text
+sort key = (-severity_weight, -time_since_reported, incident_id)
+```
+
+If fewer than 10 pending incidents exist, the remaining incident slots and
+their travel-time entries are padded with zeros.
+
+The observation also includes:
+
+- `valid_action_mask`: boolean mask over the discrete action space
+- `ambulances`: structured debug view of ambulance states
+- `incidents`: structured debug view of visible incidents
+- `travel_times`: structured 5x10 matrix
+- `visible_incident_ids`: stable incident ids aligned to the 10 incident slots
+- `info`: metrics such as average response time, coverage, utilization, and
+  missed critical cases
+
+## Action Space
+
+The action space is discrete with `55` actions:
+
+```text
+A = {0, 1, ..., 54}
+```
+
+It is partitioned into assignment actions and hold actions:
+
+- `0-49`: assign `ambulance_i` to visible `incident_slot_j`
+- `50-54`: hold action for ambulance `0-4`
+
+Assignment indexing is:
+
+```text
+action_index = ambulance_id * 10 + incident_slot
+```
+
+Hold indexing is:
+
+```text
+action_index = 50 + ambulance_id
+```
+
+Equivalently:
+
+```text
+assign(i, j) = 10i + j
+hold(i) = 50 + i
+```
+
+with `i in {0, ..., 4}` and `j in {0, ..., 9}`.
+
+The valid action set at decision time `t` is:
+
+```text
+V_t =
+  {assign(i, j) : ambulance i is free and incident slot j is occupied}
+  union
+  {hold(i) : ambulance i is free and at least one visible incident exists}
+```
+
+`valid_action_mask` is the binary encoding of `V_t` in `{0, 1}^55`.
+
+One important representation detail is that assignment actions target incident
+slots, not globally stable incident positions. Slot `j` always refers to the
+`j`th incident in the current priority-sorted visible list, and the
+`visible_incident_ids` field tells you which underlying incident ids those slots
+map to.
+
+After an action is applied, the simulator advances to the next actionable event
+rather than the next fixed time tick. In other words, one RL step corresponds
+to one dispatch decision followed by event-queue progression.
+
+## Reward
+
+The environment uses shaped rewards:
+
+- Immediate dispatch signal:
+  - `-w1 * severity_weight * estimated_travel_time`
+- Delayed arrival signal:
+  - `+w4 * severity_weight * (1 / response_time)`
+  - `-w2 * severity_weight * response_time`
+- Hold penalty:
+  - `-w3 * number_of_idle_free_ambulances` when pending incidents exist
+
+Default weights:
+
+- `w1 = 1.0`
+- `w2 = 0.8`
+- `w3 = 0.5`
+- `w4 = 1.2`
+
+## API Endpoints
+
+The OpenEnv app exposes:
+
+- `GET /health`
+- `GET /schema`
+- `GET /state`
+- `GET /tasks`
+- `POST /reset`
+- `POST /step`
+- `POST /grade/{task_id}`
+- `WS /ws`
+
+`/state` and `/schema` are overridden to expose the ERAS-specific state model
+rather than the generic base OpenEnv state. Persistent episode interaction is
+handled through `WS /ws` or the `EmergencyResponseAllocationEnv` client.
+
+`/tasks` enumerates the benchmark tasks used by the root `inference.py`
+submission runner. `/grade/{task_id}` converts completed episode metrics into a
+normalized task `score` and `reward`, both guaranteed to lie in `[0.0, 1.0]`.
 
 ## Quick Start
 
-The simplest way to use the Emergency Response Allocation environment is through the `EmergencyResponseAllocationEnv` class:
-
-```python
-from emergency_response_allocation import EmergencyResponseAllocationAction, EmergencyResponseAllocationEnv
-
-try:
-    # Create environment from Docker image
-    emergency_response_allocationenv = EmergencyResponseAllocationEnv.from_docker_image("emergency_response_allocation-env:latest")
-
-    # Reset
-    result = emergency_response_allocationenv.reset()
-    print(f"Reset: {result.observation.echoed_message}")
-
-    # Send multiple messages
-    messages = ["Hello, World!", "Testing echo", "Final message"]
-
-    for msg in messages:
-        result = emergency_response_allocationenv.step(EmergencyResponseAllocationAction(message=msg))
-        print(f"Sent: '{msg}'")
-        print(f"  → Echoed: '{result.observation.echoed_message}'")
-        print(f"  → Length: {result.observation.message_length}")
-        print(f"  → Reward: {result.reward}")
-
-finally:
-    # Always clean up
-    emergency_response_allocationenv.close()
-```
-
-That's it! The `EmergencyResponseAllocationEnv.from_docker_image()` method handles:
-- Starting the Docker container
-- Waiting for the server to be ready
-- Connecting to the environment
-- Container cleanup when you call `close()`
-
-## Building the Docker Image
-
-Before using the environment, you need to build the Docker image:
+### Run the server with uv
 
 ```bash
-# From project root
-docker build -t emergency_response_allocation-env:latest -f server/Dockerfile .
+uv run python -m emergency_response_allocation.server.app --port 8000
 ```
 
-## Deploying to Hugging Face Spaces
-
-You can easily deploy your OpenEnv environment to Hugging Face Spaces using the `openenv push` command:
-
-```bash
-# From the environment directory (where openenv.yaml is located)
-openenv push
-
-# Or specify options
-openenv push --namespace my-org --private
-```
-
-The `openenv push` command will:
-1. Validate that the directory is an OpenEnv environment (checks for `openenv.yaml`)
-2. Prepare a custom build for Hugging Face Docker space (enables web interface)
-3. Upload to Hugging Face (ensuring you're logged in)
-
-### Prerequisites
-
-- Authenticate with Hugging Face: The command will prompt for login if not already authenticated
-
-### Options
-
-- `--directory`, `-d`: Directory containing the OpenEnv environment (defaults to current directory)
-- `--repo-id`, `-r`: Repository ID in format 'username/repo-name' (defaults to 'username/env-name' from openenv.yaml)
-- `--base-image`, `-b`: Base Docker image to use (overrides Dockerfile FROM)
-- `--private`: Deploy the space as private (default: public)
-
-### Examples
-
-```bash
-# Push to your personal namespace (defaults to username/env-name from openenv.yaml)
-openenv push
-
-# Push to a specific repository
-openenv push --repo-id my-org/my-env
-
-# Push with a custom base image
-openenv push --base-image ghcr.io/meta-pytorch/openenv-base:latest
-
-# Push as a private space
-openenv push --private
-
-# Combine options
-openenv push --repo-id my-org/my-env --base-image custom-base:latest --private
-```
-
-After deployment, your space will be available at:
-`https://huggingface.co/spaces/<repo-id>`
-
-The deployed space includes:
-- **Web Interface** at `/web` - Interactive UI for exploring the environment
-- **API Documentation** at `/docs` - Full OpenAPI/Swagger interface
-- **Health Check** at `/health` - Container health monitoring
-- **WebSocket** at `/ws` - Persistent session endpoint for low-latency interactions
-
-## Environment Details
-
-### Action
-**EmergencyResponseAllocationAction**: Contains a single field
-- `message` (str) - The message to echo back
-
-### Observation
-**EmergencyResponseAllocationObservation**: Contains the echo response and metadata
-- `echoed_message` (str) - The message echoed back
-- `message_length` (int) - Length of the message
-- `reward` (float) - Reward based on message length (length × 0.1)
-- `done` (bool) - Always False for echo environment
-- `metadata` (dict) - Additional info like step count
-
-### Reward
-The reward is calculated as: `message_length × 0.1`
-- "Hi" → reward: 0.2
-- "Hello, World!" → reward: 1.3
-- Empty message → reward: 0.0
-
-## Advanced Usage
-
-### Connecting to an Existing Server
-
-If you already have a Emergency Response Allocation environment server running, you can connect directly:
+### Use the synchronous client
 
 ```python
-from emergency_response_allocation import EmergencyResponseAllocationEnv
-
-# Connect to existing server
-emergency_response_allocationenv = EmergencyResponseAllocationEnv(base_url="<ENV_HTTP_URL_HERE>")
-
-# Use as normal
-result = emergency_response_allocationenv.reset()
-result = emergency_response_allocationenv.step(EmergencyResponseAllocationAction(message="Hello!"))
-```
-
-Note: When connecting to an existing server, `emergency_response_allocationenv.close()` will NOT stop the server.
-
-### Using the Context Manager
-
-The client supports context manager usage for automatic connection management:
-
-```python
-from emergency_response_allocation import EmergencyResponseAllocationAction, EmergencyResponseAllocationEnv
-
-# Connect with context manager (auto-connects and closes)
-with EmergencyResponseAllocationEnv(base_url="http://localhost:8000") as env:
-    result = env.reset()
-    print(f"Reset: {result.observation.echoed_message}")
-    # Multiple steps with low latency
-    for msg in ["Hello", "World", "!"]:
-        result = env.step(EmergencyResponseAllocationAction(message=msg))
-        print(f"Echoed: {result.observation.echoed_message}")
-```
-
-The client uses WebSocket connections for:
-- **Lower latency**: No HTTP connection overhead per request
-- **Persistent session**: Server maintains your environment state
-- **Efficient for episodes**: Better for many sequential steps
-
-### Concurrent WebSocket Sessions
-
-The server supports multiple concurrent WebSocket connections. To enable this,
-modify `server/app.py` to use factory mode:
-
-```python
-# In server/app.py - use factory mode for concurrent sessions
-app = create_app(
-    EmergencyResponseAllocationEnvironment,  # Pass class, not instance
+from emergency_response_allocation import (
     EmergencyResponseAllocationAction,
-    EmergencyResponseAllocationObservation,
-    max_concurrent_envs=4,  # Allow 4 concurrent sessions
+    EmergencyResponseAllocationEnv,
 )
+
+env = EmergencyResponseAllocationEnv(base_url="http://127.0.0.1:8000").sync()
+
+with env:
+    result = env.reset(seed=7)
+    action_index = next(
+        i for i, ok in enumerate(result.observation.valid_action_mask) if ok
+    )
+    result = env.step(EmergencyResponseAllocationAction(action_index=action_index))
+    state = env.state()
+    print(result.reward)
+    print(state.current_sim_time)
 ```
 
-Then multiple clients can connect simultaneously:
+## Baselines
+
+Implemented baselines live in `server/baselines.py`:
+
+- Random allocation
+- Nearest ambulance heuristic
+- Severity-first greedy heuristic
+
+Example:
 
 ```python
-from emergency_response_allocation import EmergencyResponseAllocationAction, EmergencyResponseAllocationEnv
-from concurrent.futures import ThreadPoolExecutor
+from emergency_response_allocation.server.baselines import (
+    evaluate_baselines,
+    format_comparison_table,
+)
 
-def run_episode(client_id: int):
-    with EmergencyResponseAllocationEnv(base_url="http://localhost:8000") as env:
-        result = env.reset()
-        for i in range(10):
-            result = env.step(EmergencyResponseAllocationAction(message=f"Client {client_id}, step {i}"))
-        return client_id, result.observation.message_length
-
-# Run 4 episodes concurrently
-with ThreadPoolExecutor(max_workers=4) as executor:
-    results = list(executor.map(run_episode, range(4)))
+results = evaluate_baselines(num_episodes=100)
+print(format_comparison_table(results))
 ```
 
-## Development & Testing
+## Benchmark Tasks And Graders
 
-### Direct Environment Testing
+The repo now includes three benchmark-ready tasks with deterministic graders:
 
-Test the environment logic directly without starting the HTTP server:
+- `night_shift_balance`:
+  low-demand night scenario graded on coverage, utilization, response time, and
+  missed critical cases
+- `rush_hour_triage`:
+  peak-traffic scenario graded on critical response quality, tail latency, and
+  coverage
+- `citywide_surge`:
+  harder surge scenario graded on severity-weighted performance, resilience, and
+  coverage under saturation
+
+Task definitions and graders live in `server/evaluation.py`.
+
+Each grader returns:
+
+- `score` in `[0.0, 1.0]`
+- `reward` in `[0.0, 1.0]`
+
+The environment's internal shaped episode reward is still unbounded. The grader
+maps final episode metrics plus episode reward into a normalized evaluation
+reward for benchmark submission.
+
+You can enumerate tasks and grade externally computed metrics through the API:
 
 ```bash
-# From the server directory
-python3 server/emergency_response_allocation_environment.py
+curl http://127.0.0.1:8000/tasks
 ```
-
-This verifies that:
-- Environment resets correctly
-- Step executes actions properly
-- State tracking works
-- Rewards are calculated correctly
-
-### Running Locally
-
-Run the server locally for development:
 
 ```bash
-uvicorn server.app:app --reload
+curl -X POST http://127.0.0.1:8000/grade/night_shift_balance \
+  -H "Content-Type: application/json" \
+  -d '{
+    "avg_response_time": 6.5,
+    "p95_response_time": 10.2,
+    "severity_weighted_response_score": 180.0,
+    "coverage_rate": 0.92,
+    "ambulance_utilization": [0.61, 0.68, 0.74, 0.66, 0.63],
+    "missed_critical": 0,
+    "episode_reward": 24.0,
+    "step_count": 21
+  }'
 ```
 
-## Project Structure
+## Inference Submission
 
+The required submission runner is [inference.py](/Users/ashiq/Workspace/Emergency-Response-Allocation-Env/inference.py)
+at the repo root. It uses the OpenAI Python client for all LLM calls.
+
+Before running it, define these environment variables:
+
+- `API_BASE_URL`: OpenAI-compatible LLM endpoint
+- `MODEL_NAME`: model identifier to use for inference
+- `HF_TOKEN`: Hugging Face token or compatible API key
+
+Optional:
+
+- `OPENENV_URL`: ERAS environment server URL
+
+A starter env file is provided in [.env.example](/Users/ashiq/Workspace/Emergency-Response-Allocation-Env/.env.example).
+
+Example:
+
+```bash
+export API_BASE_URL="http://127.0.0.1:1234/v1"
+export MODEL_NAME="Qwen/Qwen2.5-1.5B-Instruct"
+export HF_TOKEN="your-token"
+export OPENENV_URL="http://127.0.0.1:8000"
 ```
-emergency_response_allocation/
-├── .dockerignore         # Docker build exclusions
-├── __init__.py            # Module exports
-├── README.md              # This file
-├── openenv.yaml           # OpenEnv manifest
-├── pyproject.toml         # Project metadata and dependencies
-├── uv.lock                # Locked dependencies (generated)
-├── client.py              # EmergencyResponseAllocationEnv client
-├── models.py              # Action and Observation models
-└── server/
-    ├── __init__.py        # Server module exports
-    ├── emergency_response_allocation_environment.py  # Core environment logic
-    ├── app.py             # FastAPI application (HTTP + WebSocket endpoints)
-    └── Dockerfile         # Container image definition
+
+Run the inference harness with:
+
+```bash
+uv run python inference.py
+```
+
+By default it:
+
+- enumerates all benchmark tasks
+- runs one episode per task
+- grades each task
+- verifies that final `score` and `reward` are both in `[0.0, 1.0]`
+
+The script emits structured stdout logs using only these prefixes:
+
+- `[START]`
+- `[STEP]`
+- `[END]`
+
+Each line is a single structured record with fixed field ordering. Example:
+
+```text
+[START] task_id=night_shift_balance task_index=1 task_total=3 difficulty=easy seed=7 grader=coverage_balance
+[STEP] task_id=night_shift_balance step_index=1 current_sim_time=21.52 event_type=assignment action_index=3 step_reward=-2.843100 done=0 fallback=0
+[END] task_id=night_shift_balance score=0.812340 reward=0.768901 episode_reward=14.233200 step_count=19 status=success
+```
+
+## Training
+
+The repo now includes a root training harness at `train.py` for local GRPO
+experiments against ERAS.
+
+### Install training dependencies
+
+```bash
+uv sync --extra train
+```
+
+Note: the `train` extra installs a standard PyTorch build. For GPU training,
+you may want to install a CUDA-specific PyTorch build following the official
+Transformers and PyTorch installation guidance, then re-run `uv sync --extra train`.
+
+### Smoke-test the harness
+
+This path only builds prompt states and checks reward replay, so it is the
+fastest way to confirm the environment and script are wired correctly:
+
+```bash
+uv run --extra train python train.py --dry-run --dataset-episodes 1 --rollout-steps 2
+```
+
+### Run local reward training
+
+This uses the in-process simulator for rewards and does not require a server:
+
+```bash
+uv run --extra train python train.py \
+  --model-id Qwen/Qwen2.5-1.5B-Instruct \
+  --dataset-episodes 12 \
+  --rollout-steps 8 \
+  --collection-policy nearest \
+  --reward-backend local \
+  --output-dir training/grpo-output
+```
+
+### Run remote reward training through OpenEnv
+
+Start the server in one terminal:
+
+```bash
+uv run python -m emergency_response_allocation.server.app --port 8000
+```
+
+Then run training in another terminal:
+
+```bash
+uv run --extra train python train.py \
+  --reward-backend remote \
+  --base-url http://127.0.0.1:8000
+```
+
+### Helpful flags
+
+- `--load-model-only`: verify model/tokenizer loading without training
+- `--dry-run`: build prompts and test the reward function only
+- `--push-to-hub <repo-id>`: upload saved artifacts after training
+- `--plot-metric-key <metric>`: choose an extra logged metric to plot
+- `--collection-policy random|nearest|severity_first`: choose how prompt
+  states are generated before GRPO
+
+Training outputs and plots are written under `training/grpo-output` by default.
+
+## Verification
+
+The repo includes endpoint tests that run in the project `uv` environment:
+
+```bash
+uv run --extra dev pytest -q
 ```

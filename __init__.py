@@ -8,13 +8,22 @@
 
 try:
     from .client import EmergencyResponseAllocationEnv
-    from .models import EmergencyResponseAllocationAction, EmergencyResponseAllocationObservation
+    from .models import (
+        EmergencyResponseAllocationAction,
+        EmergencyResponseAllocationObservation,
+        EmergencyResponseAllocationState,
+    )
 except ImportError:
     from client import EmergencyResponseAllocationEnv
-    from models import EmergencyResponseAllocationAction, EmergencyResponseAllocationObservation
+    from models import (
+        EmergencyResponseAllocationAction,
+        EmergencyResponseAllocationObservation,
+        EmergencyResponseAllocationState,
+    )
 
 __all__ = [
     "EmergencyResponseAllocationAction",
     "EmergencyResponseAllocationObservation",
+    "EmergencyResponseAllocationState",
     "EmergencyResponseAllocationEnv",
 ]
