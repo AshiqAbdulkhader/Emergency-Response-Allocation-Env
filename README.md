@@ -169,6 +169,71 @@ results = evaluate_baselines(num_episodes=100)
 print(format_comparison_table(results))
 ```
 
+## Training
+
+The repo now includes a root training harness at `train.py` for local GRPO
+experiments against ERAS.
+
+### Install training dependencies
+
+```bash
+uv sync --extra train
+```
+
+Note: the `train` extra installs a standard PyTorch build. For GPU training,
+you may want to install a CUDA-specific PyTorch build following the official
+Transformers and PyTorch installation guidance, then re-run `uv sync --extra train`.
+
+### Smoke-test the harness
+
+This path only builds prompt states and checks reward replay, so it is the
+fastest way to confirm the environment and script are wired correctly:
+
+```bash
+uv run --extra train python train.py --dry-run --dataset-episodes 1 --rollout-steps 2
+```
+
+### Run local reward training
+
+This uses the in-process simulator for rewards and does not require a server:
+
+```bash
+uv run --extra train python train.py \
+  --model-id Qwen/Qwen2.5-1.5B-Instruct \
+  --dataset-episodes 12 \
+  --rollout-steps 8 \
+  --collection-policy nearest \
+  --reward-backend local \
+  --output-dir training/grpo-output
+```
+
+### Run remote reward training through OpenEnv
+
+Start the server in one terminal:
+
+```bash
+uv run python -m emergency_response_allocation.server.app --port 8000
+```
+
+Then run training in another terminal:
+
+```bash
+uv run --extra train python train.py \
+  --reward-backend remote \
+  --base-url http://127.0.0.1:8000
+```
+
+### Helpful flags
+
+- `--load-model-only`: verify model/tokenizer loading without training
+- `--dry-run`: build prompts and test the reward function only
+- `--push-to-hub <repo-id>`: upload saved artifacts after training
+- `--plot-metric-key <metric>`: choose an extra logged metric to plot
+- `--collection-policy random|nearest|severity_first`: choose how prompt
+  states are generated before GRPO
+
+Training outputs and plots are written under `training/grpo-output` by default.
+
 ## Verification
 
 The repo includes endpoint tests that run in the project `uv` environment:

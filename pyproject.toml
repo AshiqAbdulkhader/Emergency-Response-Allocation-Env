@@ -33,6 +33,16 @@ dev = [
     "pytest>=8.0.0",
     "pytest-cov>=4.0.0",
 ]
+train = [
+    "accelerate>=1.0.0",
+    "datasets>=3.0.0",
+    "huggingface-hub>=0.30.0",
+    "matplotlib>=3.8.0",
+    "packaging>=24.0",
+    "torch>=2.4.0",
+    "transformers>=4.57.0",
+    "trl>=0.25.0",
+]
 
 [project.scripts]
 # Server entry point - enables running via: uv run --project . server
