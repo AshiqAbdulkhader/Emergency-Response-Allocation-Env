@@ -18,10 +18,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from inference import (
     fallback_action_index,
-    format_end_log,
-    format_start_log,
-    format_step_log,
+    action_string,
+    end_line,
     parse_action_index,
+    start_line,
+    step_line,
 )
 
 
@@ -54,34 +55,38 @@ def test_inference_helpers_choose_valid_actions_and_logs() -> None:
     observation = simulator.reset(seed=13)
     fallback_index = fallback_action_index(observation)
     assert observation.valid_action_mask[fallback_index] is True
+    assert action_string(fallback_index).startswith(("assign(", "hold("))
 
     assert parse_action_index('{"action_index": 12, "reason": "dispatch"}') == 12
     assert parse_action_index("action_index: 7") == 7
 
-    task = list_tasks()[0]
-    start_line = format_start_log(task, 1, 3)
-    step_line = format_step_log(
-        task_id=task.task_id,
-        step_index=1,
-        current_sim_time=12.5,
-        event_type="assignment",
-        action_index=fallback_index,
-        step_reward=-1.25,
-        done=False,
-        used_fallback=True,
+    start_record = start_line(
+        task="night_shift_balance",
+        env="emergency_response_allocation",
+        model="Qwen/Qwen2.5-72B-Instruct",
     )
-    end_line = format_end_log(
-        task_id=task.task_id,
+    step_record = step_line(
+        step=1,
+        action="assign(ambulance=0,incident_slot=0)",
+        reward=-1.25,
+        done=False,
+        error=None,
+    )
+    end_record = end_line(
+        success=True,
+        steps=14,
         score=0.75,
-        reward=0.8,
-        episode_reward=11.25,
-        step_count=14,
-        status="success",
+        rewards=[-1.25, 0.5, 1.0],
     )
 
-    assert start_line.startswith("[START] ")
-    assert "task_id=" in start_line
-    assert step_line.startswith("[STEP] ")
-    assert "fallback=1" in step_line
-    assert end_line.startswith("[END] ")
-    assert "score=0.750000" in end_line
+    assert start_record == (
+        "[START] task=night_shift_balance "
+        "env=emergency_response_allocation model=Qwen/Qwen2.5-72B-Instruct"
+    )
+    assert step_record == (
+        "[STEP] step=1 action=assign(ambulance=0,incident_slot=0) "
+        "reward=-1.25 done=false error=null"
+    )
+    assert end_record == (
+        "[END] success=true steps=14 score=0.750 rewards=-1.25,0.50,1.00"
+    )

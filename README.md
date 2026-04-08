@@ -351,24 +351,38 @@ curl -X POST http://127.0.0.1:8000/grade/night_shift_balance \
 The required submission runner is [inference.py](/Users/ashiq/Workspace/Emergency-Response-Allocation-Env/inference.py)
 at the repo root. It uses the OpenAI Python client for all LLM calls.
 
-Before running it, define these environment variables:
+Before submitting, ensure these environment variables are configured:
 
 - `API_BASE_URL`: OpenAI-compatible LLM endpoint
 - `MODEL_NAME`: model identifier to use for inference
 - `HF_TOKEN`: Hugging Face token or compatible API key
+- `LOCAL_IMAGE_NAME`: local Docker image name, only when running with
+  `from_docker_image(...)`
 
-Optional:
+Defaults are intentionally provided only for:
 
-- `OPENENV_URL`: ERAS environment server URL
+- `API_BASE_URL`
+- `MODEL_NAME`
+
+The script supports two execution modes:
+
+- If `LOCAL_IMAGE_NAME` is set, it launches the environment with
+  `EmergencyResponseAllocationEnv.from_docker_image(...)`
+- Otherwise it connects to `OPENENV_URL` and uses an already-running ERAS server
+
+Additional optional variable:
+
+- `OPENENV_URL`: ERAS environment server URL when not using Docker
 
 A starter env file is provided in [.env.example](/Users/ashiq/Workspace/Emergency-Response-Allocation-Env/.env.example).
 
 Example:
 
 ```bash
-export API_BASE_URL="http://127.0.0.1:1234/v1"
-export MODEL_NAME="Qwen/Qwen2.5-1.5B-Instruct"
+export API_BASE_URL="https://router.huggingface.co/v1"
+export MODEL_NAME="Qwen/Qwen2.5-72B-Instruct"
 export HF_TOKEN="your-token"
+export LOCAL_IMAGE_NAME="emergency-response-allocation:latest"
 export OPENENV_URL="http://127.0.0.1:8000"
 ```
 
@@ -383,20 +397,38 @@ By default it:
 - enumerates all benchmark tasks
 - runs one episode per task
 - grades each task
-- verifies that final `score` and `reward` are both in `[0.0, 1.0]`
+- verifies that every task score stays in `[0.0, 1.0]`
 
-The script emits structured stdout logs using only these prefixes:
+The script emits exactly three stdout line types:
 
 - `[START]`
 - `[STEP]`
 - `[END]`
 
-Each line is a single structured record with fixed field ordering. Example:
+Each line is a single structured record with fixed field ordering:
 
 ```text
-[START] task_id=night_shift_balance task_index=1 task_total=3 difficulty=easy seed=7 grader=coverage_balance
-[STEP] task_id=night_shift_balance step_index=1 current_sim_time=21.52 event_type=assignment action_index=3 step_reward=-2.843100 done=0 fallback=0
-[END] task_id=night_shift_balance score=0.812340 reward=0.768901 episode_reward=14.233200 step_count=19 status=success
+[START] task=<task_name> env=<benchmark> model=<model_name>
+[STEP] step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
+[END] success=<true|false> steps=<n> score=<score> rewards=<r1,r2,...,rn>
+```
+
+Formatting rules implemented by the script:
+
+- exactly one `[START]` line at episode begin
+- exactly one `[STEP]` line per successful `env.step(...)`
+- exactly one `[END]` line after `env.close()`, even if the episode fails
+- `reward` and `rewards` use two decimal places
+- `done` and `success` are lowercase booleans
+- `error` is `null` when there is no step error
+- `score` is normalized and clamped to `[0.0, 1.0]`
+
+Example:
+
+```text
+[START] task=night_shift_balance env=emergency_response_allocation model=Qwen/Qwen2.5-72B-Instruct
+[STEP] step=1 action=assign(ambulance=0,incident_slot=0) reward=-2.84 done=false error=null
+[END] success=true steps=19 score=0.812 rewards=-2.84,0.00,1.23
 ```
 
 ## Training
