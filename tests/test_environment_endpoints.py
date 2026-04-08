@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from emergency_response_allocation.server.app import app
 from emergency_response_allocation.server.baselines import evaluate_baselines
+from emergency_response_allocation.server.evaluation import list_tasks
 
 
 client = TestClient(app)
@@ -27,6 +28,12 @@ def test_health_and_schema_endpoints() -> None:
     assert "action_index" in schema["action"]["properties"]
     assert "observation_vector" in schema["observation"]["properties"]
     assert "current_sim_time" in schema["state"]["properties"]
+
+    tasks_response = client.get("/tasks")
+    assert tasks_response.status_code == 200
+    tasks = tasks_response.json()
+    assert len(tasks) >= 3
+    assert tasks[0]["task_id"]
 
 
 def test_http_reset_step_and_state_endpoints() -> None:
@@ -78,3 +85,22 @@ def test_baseline_evaluation_helper() -> None:
     for summary in results.values():
         assert summary.avg_response_time >= 0.0
         assert 0.0 <= summary.coverage_rate <= 1.0
+
+
+def test_grade_endpoint_returns_unit_interval_scores() -> None:
+    task = list_tasks()[0]
+    payload = {
+        "avg_response_time": 6.0,
+        "p95_response_time": 10.0,
+        "severity_weighted_response_score": 180.0,
+        "coverage_rate": 0.9,
+        "ambulance_utilization": [0.62, 0.65, 0.71, 0.69, 0.67],
+        "missed_critical": 0,
+        "episode_reward": 18.5,
+        "step_count": 20,
+    }
+    response = client.post(f"/grade/{task.task_id}", json=payload)
+    assert response.status_code == 200
+    graded = response.json()
+    assert 0.0 <= graded["score"] <= 1.0
+    assert 0.0 <= graded["reward"] <= 1.0

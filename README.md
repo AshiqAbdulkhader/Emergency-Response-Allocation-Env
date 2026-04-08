@@ -237,13 +237,19 @@ The OpenEnv app exposes:
 - `GET /health`
 - `GET /schema`
 - `GET /state`
+- `GET /tasks`
 - `POST /reset`
 - `POST /step`
+- `POST /grade/{task_id}`
 - `WS /ws`
 
 `/state` and `/schema` are overridden to expose the ERAS-specific state model
 rather than the generic base OpenEnv state. Persistent episode interaction is
 handled through `WS /ws` or the `EmergencyResponseAllocationEnv` client.
+
+`/tasks` enumerates the benchmark tasks used by the root `inference.py`
+submission runner. `/grade/{task_id}` converts completed episode metrics into a
+normalized task `score` and `reward`, both guaranteed to lie in `[0.0, 1.0]`.
 
 ## Quick Start
 
@@ -292,6 +298,105 @@ from emergency_response_allocation.server.baselines import (
 
 results = evaluate_baselines(num_episodes=100)
 print(format_comparison_table(results))
+```
+
+## Benchmark Tasks And Graders
+
+The repo now includes three benchmark-ready tasks with deterministic graders:
+
+- `night_shift_balance`:
+  low-demand night scenario graded on coverage, utilization, response time, and
+  missed critical cases
+- `rush_hour_triage`:
+  peak-traffic scenario graded on critical response quality, tail latency, and
+  coverage
+- `citywide_surge`:
+  harder surge scenario graded on severity-weighted performance, resilience, and
+  coverage under saturation
+
+Task definitions and graders live in `server/evaluation.py`.
+
+Each grader returns:
+
+- `score` in `[0.0, 1.0]`
+- `reward` in `[0.0, 1.0]`
+
+The environment's internal shaped episode reward is still unbounded. The grader
+maps final episode metrics plus episode reward into a normalized evaluation
+reward for benchmark submission.
+
+You can enumerate tasks and grade externally computed metrics through the API:
+
+```bash
+curl http://127.0.0.1:8000/tasks
+```
+
+```bash
+curl -X POST http://127.0.0.1:8000/grade/night_shift_balance \
+  -H "Content-Type: application/json" \
+  -d '{
+    "avg_response_time": 6.5,
+    "p95_response_time": 10.2,
+    "severity_weighted_response_score": 180.0,
+    "coverage_rate": 0.92,
+    "ambulance_utilization": [0.61, 0.68, 0.74, 0.66, 0.63],
+    "missed_critical": 0,
+    "episode_reward": 24.0,
+    "step_count": 21
+  }'
+```
+
+## Inference Submission
+
+The required submission runner is [inference.py](/Users/ashiq/Workspace/Emergency-Response-Allocation-Env/inference.py)
+at the repo root. It uses the OpenAI Python client for all LLM calls.
+
+Before running it, define these environment variables:
+
+- `API_BASE_URL`: OpenAI-compatible LLM endpoint
+- `MODEL_NAME`: model identifier to use for inference
+- `HF_TOKEN`: Hugging Face token or compatible API key
+
+Optional:
+
+- `OPENENV_URL`: ERAS environment server URL
+
+A starter env file is provided in [.env.example](/Users/ashiq/Workspace/Emergency-Response-Allocation-Env/.env.example).
+
+Example:
+
+```bash
+export API_BASE_URL="http://127.0.0.1:1234/v1"
+export MODEL_NAME="Qwen/Qwen2.5-1.5B-Instruct"
+export HF_TOKEN="your-token"
+export OPENENV_URL="http://127.0.0.1:8000"
+```
+
+Run the inference harness with:
+
+```bash
+uv run python inference.py
+```
+
+By default it:
+
+- enumerates all benchmark tasks
+- runs one episode per task
+- grades each task
+- verifies that final `score` and `reward` are both in `[0.0, 1.0]`
+
+The script emits structured stdout logs using only these prefixes:
+
+- `[START]`
+- `[STEP]`
+- `[END]`
+
+Each line is a single structured record with fixed field ordering. Example:
+
+```text
+[START] task_id=night_shift_balance task_index=1 task_total=3 difficulty=easy seed=7 grader=coverage_balance
+[STEP] task_id=night_shift_balance step_index=1 current_sim_time=21.52 event_type=assignment action_index=3 step_reward=-2.843100 done=0 fallback=0
+[END] task_id=night_shift_balance score=0.812340 reward=0.768901 episode_reward=14.233200 step_count=19 status=success
 ```
 
 ## Training

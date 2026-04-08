@@ -22,6 +22,7 @@ try:
         EmergencyResponseAllocationObservation,
         EmergencyResponseAllocationState,
     )
+    from ..server.evaluation import GradeRequest, GradeResult, TaskSpec, grade_request_for_task, list_task_specs
     from ..server.emergency_response_allocation_environment import (
         EmergencyResponseAllocationEnvironment,
     )
@@ -30,6 +31,13 @@ except ImportError:
         EmergencyResponseAllocationAction,
         EmergencyResponseAllocationObservation,
         EmergencyResponseAllocationState,
+    )
+    from server.evaluation import (
+        GradeRequest,
+        GradeResult,
+        TaskSpec,
+        grade_request_for_task,
+        list_task_specs,
     )
     from server.emergency_response_allocation_environment import (
         EmergencyResponseAllocationEnvironment,
@@ -76,6 +84,20 @@ async def schema() -> SchemaResponse:
         observation=EmergencyResponseAllocationObservation.model_json_schema(),
         state=EmergencyResponseAllocationState.model_json_schema(),
     )
+
+
+@app.get("/tasks", response_model=list[TaskSpec], tags=["Evaluation"])
+async def tasks() -> list[TaskSpec]:
+    """Enumerate ERAS benchmark tasks."""
+
+    return list_task_specs()
+
+
+@app.post("/grade/{task_id}", response_model=GradeResult, tags=["Evaluation"])
+async def grade(task_id: str, request: GradeRequest) -> GradeResult:
+    """Grade externally supplied task metrics into [0, 1] scores."""
+
+    return grade_request_for_task(task_id, request)
 
 
 def main(host: str = "0.0.0.0", port: int = 8000):
