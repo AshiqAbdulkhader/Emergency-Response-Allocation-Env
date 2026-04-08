@@ -6,6 +6,8 @@
 
 """FastAPI app for the Emergency Response Allocation OpenEnv environment."""
 
+from __future__ import annotations
+
 from fastapi import FastAPI
 
 try:
@@ -100,7 +102,7 @@ async def grade(task_id: str, request: GradeRequest) -> GradeResult:
     return grade_request_for_task(task_id, request)
 
 
-def main(host: str = "0.0.0.0", port: int = 8000):
+def main(host: str = "0.0.0.0", port: int = 8000) -> None:
     """Run the environment server with uvicorn."""
     import uvicorn
 
@@ -112,5 +114,9 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--host", default="0.0.0.0")
     args = parser.parse_args()
-    main(port=args.port)
+    if args.host == "0.0.0.0" and args.port == 8000:
+        main()
+    else:
+        main(host=args.host, port=args.port)
